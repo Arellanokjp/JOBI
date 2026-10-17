@@ -388,6 +388,7 @@ model users {
   saved_jobs            saved_jobs[]
   roles                 roles                   @relation(fields: [role_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_users_role")
   verification_attempts verification_attempts[]
+  email_verification_otps email_verification_otps[]
 
   @@index([role_id], map: "fk_users_role")
 }
@@ -407,4 +408,20 @@ model verification_attempts {
 
   @@index([company_id], map: "fk_verification_company")
   @@index([reviewed_by_user_id], map: "fk_verification_reviewer")
+}
+
+model email_verification_otps {
+  id         String    @id @db.Char(36)
+  user_id    String    @db.Char(36)
+  otp_hash   String    @db.VarChar(255)
+  purpose    String    @db.VarChar(30)
+  expires_at DateTime  @db.DateTime(0)
+  used_at    DateTime? @db.DateTime(0)
+  attempts   Int       @default(0)
+  created_at DateTime  @default(now()) @db.Timestamp(0)
+
+  users users @relation(fields: [user_id], references: [id], onDelete: NoAction, onUpdate: NoAction, map: "fk_email_otp_user")
+
+  @@index([user_id, purpose], map: "idx_email_otp_user_purpose")
+  @@index([expires_at], map: "idx_email_otp_expiry")
 }
