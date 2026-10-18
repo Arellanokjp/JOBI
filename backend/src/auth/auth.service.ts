@@ -4,30 +4,31 @@ import {
   UnauthorizedException,
   BadRequestException,
   InternalServerErrorException,
+  NotFoundException
 } from '@nestjs/common';
 
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
+import { EmailService } from '../email/email.service';
 
 import { RegisterJobSeekerDto } from './dto/register-job-seeker.dto';
 import { RegisterEmployerDto } from './dto/register-employer.dto';
 import { LoginDto } from './dto/login.dto';
 
 import * as bcrypt from 'bcrypt';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomInt } from 'crypto';
 
 @Injectable()
 export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
+    private readonly emailService: EmailService,
   ) {}
 
   // Find a role by its name.
   //
-  // This preserves our existing dynamic role lookup approach.
-  // We can replace it with an explicit field lookup after
-  // confirming the actual roles model in schema.prisma.
+  // Preserves the existing dynamic role lookup approach.
   private async findRoleId(roleName: string): Promise<string> {
     const roles = await this.prisma.roles.findMany();
 
@@ -62,6 +63,81 @@ export class AuthService {
     return roleId;
   }
 
+  // Generate, hash, store, and email a one-time password.
+  private async createAndSendOtp(
+    userId: string,
+    email: string,
+    purpose:
+      | 'EMAIL_VERIFICATION'
+      | 'PASSWORD_RESET'
+      | 'PASSWORD_CHANGE',
+  ): Promise<void> {
+    // Generate a cryptographically secure six-digit OTP.
+    const otp = randomInt(100000, 1000000).toString();
+
+    // Store only the hash, never the plain-text OTP.
+    const otpHash = await bcrypt.hash(otp, 12);
+
+    const now = new Date();
+
+    // OTP expires after 10 minutes.
+    const expiresAt = new Date(
+      now.getTime() + 10 * 60 * 1000,
+    );
+
+    // Invalidate previous unused OTPs and save the new OTP.
+    await this.prisma.$transaction(async (tx) => {
+      await tx.email_verification_otps.updateMany({
+        where: {
+          user_id: userId,
+          purpose,
+          used_at: null,
+        },
+        data: {
+          used_at: now,
+        },
+      });
+
+      await tx.email_verification_otps.create({
+        data: {
+          id: randomUUID(),
+          user_id: userId,
+          otp_hash: otpHash,
+          purpose,
+          expires_at: expiresAt,
+        },
+      });
+    });
+
+    // Send the OTP using the existing EmailService.
+    try {
+      await this.emailService.sendOtpEmail(
+        email,
+        otp,
+        purpose,
+      );
+    } catch {
+      // Invalidate the newly created OTP if delivery fails.
+      await this.prisma.email_verification_otps.updateMany({
+        where: {
+          user_id: userId,
+          purpose,
+          used_at: null,
+          created_at: {
+            gte: now,
+          },
+        },
+        data: {
+          used_at: new Date(),
+        },
+      });
+
+      throw new InternalServerErrorException(
+        'Unable to send the verification email. Please try again later.',
+      );
+    }
+  }
+
   // Shared registration logic.
   private async registerUser(
     dto: RegisterJobSeekerDto | RegisterEmployerDto,
@@ -78,15 +154,21 @@ export class AuthService {
     try {
       const roleId = await this.findRoleId(roleName);
 
-      const passwordHash = await bcrypt.hash(password, 12);
+      const passwordHash = await bcrypt.hash(
+        password,
+        12,
+      );
 
+      const normalizedEmail = email.trim().toLowerCase();
+
+      // Create the account as unverified and pending.
       const user = await this.prisma.users.create({
         data: {
           id: randomUUID(),
           role_id: roleId,
           first_name,
           last_name,
-          email,
+          email: normalizedEmail,
           phone_number,
           password_hash: passwordHash,
           email_verified: false,
@@ -105,11 +187,18 @@ export class AuthService {
         },
       });
 
+      // Create the OTP and send the verification email.
+      await this.createAndSendOtp(
+        user.id,
+        user.email,
+        'EMAIL_VERIFICATION',
+      );
+
       return {
         message:
           roleName === 'EMPLOYER'
-            ? 'Employer account created. Complete email verification and company verification before accessing employer features.'
-            : 'Job seeker account created. Complete email verification before logging in.',
+            ? 'Employer account created. Check your email to verify your address. Company verification and administrator approval are also required.'
+            : 'Job seeker account created. Check your email to verify your address before logging in.',
         user,
       };
     } catch (error) {
@@ -136,18 +225,28 @@ export class AuthService {
   }
 
   // Register a job seeker.
-  async registerJobSeeker(dto: RegisterJobSeekerDto) {
-    return this.registerUser(dto, 'JOB_SEEKER');
+  async registerJobSeeker(
+    dto: RegisterJobSeekerDto,
+  ) {
+    return this.registerUser(
+      dto,
+      'JOB_SEEKER',
+    );
   }
 
   // Register an employer.
-  async registerEmployer(dto: RegisterEmployerDto) {
-    return this.registerUser(dto, 'EMPLOYER');
+  async registerEmployer(
+    dto: RegisterEmployerDto,
+  ) {
+    return this.registerUser(
+      dto,
+      'EMPLOYER',
+    );
   }
 
   // Log in using email and password.
   async login(dto: LoginDto) {
-    const email = dto.email.trim();
+    const email = dto.email.trim().toLowerCase();
 
     const user = await this.prisma.users.findFirst({
       where: {
@@ -157,7 +256,7 @@ export class AuthService {
     });
 
     // Use a generic message to avoid revealing
-    // whether a particular email address exists.
+    // whether an email address exists.
     if (!user || !user.password_hash) {
       throw new UnauthorizedException(
         'Invalid email or password.',
@@ -175,7 +274,7 @@ export class AuthService {
       );
     }
 
-    // Do not issue a login token to an unverified account.
+    // Do not issue a token to an unverified account.
     if (!user.email_verified) {
       throw new UnauthorizedException(
         'Please verify your email before logging in.',

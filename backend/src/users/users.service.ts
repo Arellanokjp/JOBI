@@ -87,62 +87,56 @@ export class UsersService {
 
   // PATCH /api/v1/users/:id
   async update(
-    id: string,
-    updateUserDto: UpdateUserDto,
-  ) {
-    await this.findActiveUser(id);
+  id: string,
+  updateUserDto: UpdateUserDto,
+) {
+  await this.findActiveUser(id);
 
-    const {
-      first_name,
-      last_name,
-      email,
-      phone_number,
-      password,
-    } = updateUserDto;
+  const {
+    first_name,
+    last_name,
+    email,
+    phone_number,
+  } = updateUserDto;
 
-    const data: {
-      first_name?: string;
-      last_name?: string;
-      email?: string;
-      phone_number?: string;
-      password_hash?: string;
-      updated_at: Date;
-    } = {
-      updated_at: new Date(),
-    };
+  const data: {
+    first_name?: string;
+    last_name?: string;
+    email?: string;
+    phone_number?: string;
+    updated_at: Date;
+  } = {
+    updated_at: new Date(),
+  };
 
-    if (first_name !== undefined) {
-      data.first_name = first_name;
-    }
-
-    if (last_name !== undefined) {
-      data.last_name = last_name;
-    }
-
-    if (email !== undefined) {
-      data.email = email;
-    }
-
-    if (phone_number !== undefined) {
-      data.phone_number = phone_number;
-    }
-
-    if (password !== undefined) {
-      data.password_hash = await bcrypt.hash(password, 12);
-    }
-
-    try {
-      return await this.prisma.users.update({
-        where: {
-          id,
-        },
-        data,
-        select: this.publicUserSelect,
-      });
-    } catch (error) {
-      return this.handleDatabaseError(error);
-    }
+  if (first_name !== undefined) {
+    data.first_name = first_name;
   }
+
+  if (last_name !== undefined) {
+    data.last_name = last_name;
+  }
+
+  if (email !== undefined) {
+    data.email = email;
+  }
+
+  if (phone_number !== undefined) {
+    data.phone_number = phone_number;
+  }
+
+  try {
+    return await this.prisma.users.update({
+      where: {
+        id,
+      },
+      data,
+      select: this.publicUserSelect,
+    });
+  } catch (error) {
+    return this.handleDatabaseError(error);
+  }
+}
 
   // DELETE /api/v1/users/:id
   // Soft-deletes a user instead of permanently removing the record.
