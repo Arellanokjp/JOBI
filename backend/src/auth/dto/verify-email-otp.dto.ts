@@ -1,6 +1,5 @@
 import {
   IsEmail,
-  IsNotEmpty,
   IsString,
   Length,
   Matches,
@@ -8,13 +7,14 @@ import {
 
 export class VerifyEmailOtpDto {
   @IsEmail()
-  @IsNotEmpty()
   email: string;
 
   @IsString()
-  @Length(6, 6)
+  @Length(6, 6, {
+    message: 'OTP must contain exactly 6 digits.',
+  })
   @Matches(/^\d{6}$/, {
-    message: 'OTP must contain exactly six digits.',
+    message: 'OTP must contain only digits.',
   })
   otp: string;
 }

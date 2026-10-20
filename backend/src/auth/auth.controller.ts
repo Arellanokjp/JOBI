@@ -16,6 +16,8 @@ import { AuthService } from './auth.service';
 import { RegisterJobSeekerDto } from './dto/register-job-seeker.dto';
 import { RegisterEmployerDto } from './dto/register-employer.dto';
 import { LoginDto } from './dto/login.dto';
+import { VerifyEmailOtpDto } from './dto/verify-email-otp.dto';
+import { ResendEmailOtpDto } from './dto/resend-email-otp.dto';
 
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
@@ -58,6 +60,22 @@ export class AuthController {
     @Body() dto: LoginDto,
   ) {
     return this.authService.login(dto);
+  }
+
+  @Post('email/verify-otp')
+  @HttpCode(HttpStatus.OK)
+  verifyEmailOtp(
+    @Body() dto: VerifyEmailOtpDto,
+  ) {
+    return this.authService.verifyEmailOtp(dto);
+  }
+
+  @Post('email/resend-otp')
+  @HttpCode(HttpStatus.OK)
+  resendEmailOtp(
+    @Body() dto: ResendEmailOtpDto,
+  ) {
+    return this.authService.resendEmailOtp(dto);
   }
 
   @Get('me')
