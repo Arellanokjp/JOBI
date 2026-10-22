@@ -29,7 +29,7 @@ export class EmailService {
     );
 
     const port = Number(
-      this.configService.get<string>('EMAIL_PORT', '587'),
+      this.configService.get<string>('EMAIL_PORT', '465'),
     );
 
     this.transporter = nodemailer.createTransport({
