@@ -226,7 +226,7 @@ export class AuthService {
   async registerEmployer(dto: RegisterEmployerDto) {
     return this.registerUser(dto, 'EMPLOYER');
   }
-
+  
   // Verify an email using its OTP.
   async verifyEmailOtp(dto: VerifyEmailOtpDto) {
     const email = dto.email.trim().toLowerCase();
