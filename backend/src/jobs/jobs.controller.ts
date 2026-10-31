@@ -1,48 +1,48 @@
-﻿import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
-import type { Request } from 'express';
+import {
+  Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards,
+} from '@nestjs/common';
 import { JobsService } from './jobs.service';
-import { CreateResourceDto } from './dto/create-jobs.dto';
-import { UpdateResourceDto } from './dto/update-jobs.dto';
-import { JobiJwtAuthGuard } from '../common/jobi-jwt-auth.guard';
-import { jobiRole, jobiUserId, JobiRequestUser } from '../common/jobi-request-user';
+import { CreateJobDto } from './dto/create-jobs.dto';
+import { ListJobsQueryDto, UpdateJobDto } from './dto/update-jobs.dto';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { CurrentUser, type AuthUser } from '../common/auth-user';
 
 @Controller('jobs')
+@UseGuards(JwtAuthGuard, RolesGuard)
 export class JobsController {
   constructor(private readonly service: JobsService) {}
 
   @Get()
-  @UseGuards(JobiJwtAuthGuard)
-  findAll(@Req() req: Request) {
-    const user = (req as any).user as JobiRequestUser | undefined;
-    return this.service.findAll(jobiUserId(user), jobiRole(user));
+  findAll(@CurrentUser() user: AuthUser, @Query() query: ListJobsQueryDto) {
+    return this.service.findAll(user, query);
   }
 
   @Get(':id')
-  @UseGuards(JobiJwtAuthGuard)
-  findOne(@Param('id') id: string, @Req() req: Request) {
-    const user = (req as any).user as JobiRequestUser | undefined;
-    return this.service.findOne(id, jobiUserId(user), jobiRole(user));
+  findOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
+    return this.service.findOne(id, user);
   }
 
   @Post()
-  @UseGuards(JobiJwtAuthGuard)
-  create(@Body() dto: CreateResourceDto, @Req() req: Request) {
-    const user = (req as any).user as JobiRequestUser | undefined;
-    return this.service.create(dto as Record<string, unknown>, jobiUserId(user), jobiRole(user));
+  @Roles('EMPLOYER')
+  create(@Body() dto: CreateJobDto, @CurrentUser() user: AuthUser) {
+    return this.service.create(dto, user);
   }
 
   @Patch(':id')
-  @UseGuards(JobiJwtAuthGuard)
-  update(@Param('id') id: string, @Body() dto: UpdateResourceDto, @Req() req: Request) {
-    const user = (req as any).user as JobiRequestUser | undefined;
-    return this.service.update(id, dto as Record<string, unknown>, jobiUserId(user), jobiRole(user));
+  @Roles('EMPLOYER', 'ADMIN')
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateJobDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.service.update(id, dto, user);
   }
 
   @Delete(':id')
-  @UseGuards(JobiJwtAuthGuard)
-  remove(@Param('id') id: string, @Req() req: Request) {
-    const user = (req as any).user as JobiRequestUser | undefined;
-    return this.service.remove(id, jobiUserId(user), jobiRole(user));
+  @Roles('EMPLOYER', 'ADMIN')
+  remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
+    return this.service.remove(id, user);
   }
 }
-

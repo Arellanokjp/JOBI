@@ -1,66 +1,199 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
+
 import { PrismaService } from '../prisma/prisma.service';
+import { createNotification, NOTIFICATION_TYPE } from '../notifications/notify';
+import type { AuthUser } from '../common/auth-user';
+import {
+  APPLICATION_STATUS, INTERVIEW_STATUS, INTERVIEW_TYPE, TERMINAL_APPLICATION_STATUSES,
+} from '../common/constants';
+import { CreateInterviewDto } from './dto/create-interviews.dto';
+import { UpdateInterviewDto } from './dto/update-interviews.dto';
+
+const include = {
+  applications: {
+    select: {
+      id: true,
+      status: true,
+      job_id: true,
+      jobs: { select: { id: true, title: true } },
+      users: { select: { id: true, first_name: true, last_name: true, email: true } },
+    },
+  },
+} satisfies Prisma.interviewsInclude;
+
+/** Statuses from which scheduling an interview moves the application forward. */
+const PRE_INTERVIEW: string[] = [
+  APPLICATION_STATUS.SUBMITTED,
+  APPLICATION_STATUS.UNDER_REVIEW,
+  APPLICATION_STATUS.SHORTLISTED,
+];
 
 @Injectable()
 export class InterviewsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private get db(): any {
-    return (this.prisma as any).interviews;
+  /** Candidates: interviews for their applications. Employers: for their company's jobs. */
+  private visibleWhere(user: AuthUser): Prisma.interviewsWhereInput {
+    switch (user.role) {
+      case 'ADMIN':
+        return { deleted_at: null };
+      case 'EMPLOYER':
+        return {
+          deleted_at: null,
+          applications: { jobs: { companies: { owner_user_id: user.id } } },
+        };
+      default:
+        return { deleted_at: null, applications: { applicant_user_id: user.id } };
+    }
   }
 
-  async findAll(userId?: string, role?: string) {
-    const where: Record<string, unknown> = {};
-    if (false && userId && role !== 'ADMIN') {
-      where['id'] = userId;
-    }
-    if ('deleted_at' in (this.db.fields ?? {})) {
-      where['deleted_at'] = null;
-    }
-    return this.db.findMany({ where, orderBy: { created_at: 'desc' } });
+  /** Internal notes are for the hiring side only. */
+  private scrub<T extends { notes?: string | null }>(item: T, user: AuthUser): T {
+    return user.role === 'JOB_SEEKER' ? { ...item, notes: null } : item;
   }
 
-  async findOne(id: string, userId?: string, role?: string) {
-    if (!id) throw new BadRequestException('A valid ID is required.');
-    const item = await this.db.findUnique({ where: { id } });
-    if (!item) throw new NotFoundException('Record not found.');
-    if (false && role !== 'ADMIN' && userId && item['id'] !== userId) {
-      throw new ForbiddenException('You cannot access this record.');
-    }
-    return item;
+  async findAll(user: AuthUser, applicationId?: string) {
+    const items = await this.prisma.interviews.findMany({
+      where: { ...this.visibleWhere(user), ...(applicationId ? { application_id: applicationId } : {}) },
+      include,
+      orderBy: { scheduled_at: 'asc' },
+    });
+    return items.map((item) => this.scrub(item, user));
   }
 
-  async create(data: Record<string, unknown>, userId?: string, role?: string) {
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      throw new BadRequestException('Request body must be an object.');
-    }
-    const payload: Record<string, unknown> = { ...data, id: typeof data.id === 'string' ? data.id : randomUUID() };
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    if (false && userId && role !== 'ADMIN') {
-      payload['id'] = userId;
-    }
-    return this.db.create({ data: payload });
+  async findOne(id: string, user: AuthUser) {
+    const item = await this.prisma.interviews.findFirst({
+      where: { id, ...this.visibleWhere(user) },
+      include,
+    });
+    if (!item) throw new NotFoundException('Interview not found.');
+    return this.scrub(item, user);
   }
 
-  async update(id: string, data: Record<string, unknown>, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    const payload: Record<string, unknown> = { ...data };
-    delete payload.id;
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    return this.db.update({ where: { id }, data: payload });
+  /** VIDEO interviews need a link; IN_PERSON interviews need a place. */
+  private assertLogistics(type: string, meetingUrl?: string | null, location?: string | null) {
+    if (type === INTERVIEW_TYPE.VIDEO && !meetingUrl) {
+      throw new BadRequestException('meeting_url is required for VIDEO interviews.');
+    }
+    if (type === INTERVIEW_TYPE.IN_PERSON && !location) {
+      throw new BadRequestException('location is required for IN_PERSON interviews.');
+    }
   }
 
-  async remove(id: string, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    // Most JOBI entities support soft deletion; saved_jobs and some join tables do not.
-    if (['companies','company_branches','company_documents','jobs','resumes','education','experience','certifications','interviews'].includes('interviews')) {
-      return this.db.update({ where: { id }, data: { deleted_at: new Date() } });
+  private assertFuture(value: string) {
+    if (new Date(value).getTime() <= Date.now()) {
+      throw new BadRequestException('scheduled_at must be in the future.');
     }
-    return this.db.delete({ where: { id } });
+  }
+
+  async create(dto: CreateInterviewDto, user: AuthUser) {
+    const app = await this.prisma.applications.findFirst({
+      where: {
+        id: dto.application_id,
+        ...(user.role === 'ADMIN' ? {} : { jobs: { companies: { owner_user_id: user.id } } }),
+      },
+      include: { jobs: { select: { title: true } } },
+    });
+    if (!app) throw new NotFoundException('Application not found.');
+
+    if (TERMINAL_APPLICATION_STATUSES.includes(app.status)) {
+      throw new ConflictException(`Cannot schedule an interview for an application that is ${app.status}.`);
+    }
+
+    this.assertLogistics(dto.interview_type, dto.meeting_url, dto.location);
+    this.assertFuture(dto.scheduled_at);
+
+    const id = randomUUID();
+    await this.prisma.$transaction(async (tx) => {
+      await tx.interviews.create({
+        data: {
+          ...dto,
+          id,
+          scheduled_at: new Date(dto.scheduled_at),
+          scheduled_by_user_id: user.id,
+          status: INTERVIEW_STATUS.SCHEDULED,
+        },
+      });
+
+      if (PRE_INTERVIEW.includes(app.status)) {
+        await tx.applications.update({
+          where: { id: app.id },
+          data: { status: APPLICATION_STATUS.INTERVIEW_SCHEDULED },
+        });
+      }
+
+      await createNotification(tx, {
+        user_id: app.applicant_user_id,
+        title: 'Interview scheduled',
+        message: `An interview for "${app.jobs.title}" has been scheduled for ${new Date(dto.scheduled_at).toUTCString()}.`,
+        notification_type: NOTIFICATION_TYPE.INTERVIEW,
+      });
+    });
+
+    return this.findOne(id, user);
+  }
+
+  async update(id: string, dto: UpdateInterviewDto, user: AuthUser) {
+    const interview = await this.prisma.interviews.findFirst({
+      where: { id, ...this.visibleWhere(user) },
+      include: { applications: { select: { applicant_user_id: true, jobs: { select: { title: true } } } } },
+    });
+    if (!interview) throw new NotFoundException('Interview not found.');
+
+    this.assertLogistics(
+      dto.interview_type ?? interview.interview_type,
+      dto.meeting_url !== undefined ? dto.meeting_url : interview.meeting_url,
+      dto.location !== undefined ? dto.location : interview.location,
+    );
+    if (dto.scheduled_at) this.assertFuture(dto.scheduled_at);
+
+    const { scheduled_at, ...rest } = dto;
+    const rescheduled =
+      scheduled_at !== undefined &&
+      new Date(scheduled_at).getTime() !== interview.scheduled_at.getTime();
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.interviews.update({
+        where: { id },
+        data: { ...rest, ...(scheduled_at !== undefined ? { scheduled_at: new Date(scheduled_at) } : {}) },
+      });
+
+      if (rescheduled) {
+        await createNotification(tx, {
+          user_id: interview.applications.applicant_user_id,
+          title: 'Interview rescheduled',
+          message: `Your interview for "${interview.applications.jobs.title}" is now ${new Date(scheduled_at!).toUTCString()}.`,
+          notification_type: NOTIFICATION_TYPE.INTERVIEW,
+        });
+      }
+    });
+
+    return this.findOne(id, user);
+  }
+
+  /** Soft delete; the candidate is told it was cancelled. */
+  async remove(id: string, user: AuthUser) {
+    const interview = await this.prisma.interviews.findFirst({
+      where: { id, ...this.visibleWhere(user) },
+      include: { applications: { select: { applicant_user_id: true, jobs: { select: { title: true } } } } },
+    });
+    if (!interview) throw new NotFoundException('Interview not found.');
+
+    await this.prisma.$transaction(async (tx) => {
+      await tx.interviews.update({
+        where: { id },
+        data: { deleted_at: new Date(), status: INTERVIEW_STATUS.CANCELLED },
+      });
+      await createNotification(tx, {
+        user_id: interview.applications.applicant_user_id,
+        title: 'Interview cancelled',
+        message: `Your interview for "${interview.applications.jobs.title}" was cancelled.`,
+        notification_type: NOTIFICATION_TYPE.INTERVIEW,
+      });
+    });
+
+    return { message: 'Interview cancelled.' };
   }
 }

@@ -1,7 +1,9 @@
-/**
- * Request body is validated by the service/Prisma schema at runtime.
- * Add class-validator decorators once the frontend contract is finalized.
- */
-export class CreateResourceDto {
-  [key: string]: unknown;
+import { IsOptional, IsString, MaxLength } from 'class-validator';
+
+export class CreateResumeDto {
+  @IsOptional() @IsString() @MaxLength(10000)
+  professional_summary?: string;
+
+  @IsOptional() @IsString() @MaxLength(500)
+  resume_file_url?: string;
 }

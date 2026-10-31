@@ -1,70 +1,105 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
+
 import { PrismaService } from '../prisma/prisma.service';
+import type { AuthUser } from '../common/auth-user';
+import { VERIFICATION_STATUS } from '../common/constants';
+import { CreateCompanyDto } from './dto/create-companies.dto';
+import { UpdateCompanyDto } from './dto/update-companies.dto';
+
+/** What job seekers may see about a company (no registration/tax details). */
+const publicCompanySelect = {
+  id: true,
+  company_name: true,
+  website: true,
+  industry: true,
+  description: true,
+  logo_url: true,
+  country: true,
+  county: true,
+  city: true,
+  verification_status: true,
+} satisfies Prisma.companiesSelect;
 
 @Injectable()
 export class CompaniesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private get db(): any {
-    return (this.prisma as any).companies;
+  /** Which companies the caller may see. */
+  private visibleWhere(user: AuthUser): Prisma.companiesWhereInput {
+    switch (user.role) {
+      case 'ADMIN':
+        return { deleted_at: null };
+      case 'EMPLOYER':
+        return { deleted_at: null, owner_user_id: user.id };
+      default:
+        return { deleted_at: null, verification_status: VERIFICATION_STATUS.APPROVED };
+    }
   }
 
-  private scopeByOwner(userId: string, where: Record<string, unknown> = {}) {
-    return { ...where, owner_user_id: userId };
+  findAll(user: AuthUser) {
+    return this.prisma.companies.findMany({
+      where: this.visibleWhere(user),
+      ...(user.role === 'JOB_SEEKER' ? { select: publicCompanySelect } : {}),
+      orderBy: { created_at: 'desc' },
+    });
   }
 
-  async findAll(userId?: string, role?: string) {
-    const where: Record<string, unknown> = {};
-    if (true && userId && role !== 'ADMIN') {
-      where['owner_user_id'] = userId;
-    }
-    if ('deleted_at' in (this.db.fields ?? {})) {
-      where['deleted_at'] = null;
-    }
-    return this.db.findMany({ where, orderBy: { created_at: 'desc' } });
+  async findOne(id: string, user: AuthUser) {
+    const company = await this.prisma.companies.findFirst({
+      where: { id, ...this.visibleWhere(user) },
+      ...(user.role === 'JOB_SEEKER' ? { select: publicCompanySelect } : {}),
+    });
+    if (!company) throw new NotFoundException('Company not found.');
+    return company;
   }
 
-  async findOne(id: string, userId?: string, role?: string) {
-    if (!id) throw new BadRequestException('A valid ID is required.');
-    const item = await this.db.findUnique({ where: { id } });
-    if (!item) throw new NotFoundException('Record not found.');
-    if (true && role !== 'ADMIN' && userId && item['owner_user_id'] !== userId) {
-      throw new ForbiddenException('You cannot access this record.');
+  /** An employer may own exactly one company (owner_user_id is unique). */
+  async create(dto: CreateCompanyDto, user: AuthUser) {
+    const data = {
+      ...dto,
+      email: dto.email.trim().toLowerCase(),
+      verification_status: VERIFICATION_STATUS.PENDING,
+      verified_at: null,
+      deleted_at: null,
+    };
+
+    const existing = await this.prisma.companies.findUnique({
+      where: { owner_user_id: user.id },
+    });
+
+    if (existing && !existing.deleted_at) {
+      throw new ConflictException('You have already created a company profile.');
     }
-    return item;
+
+    // A previously deleted profile is restored so the unique owner link stays valid.
+    if (existing) {
+      return this.prisma.companies.update({ where: { id: existing.id }, data });
+    }
+
+    return this.prisma.companies.create({
+      data: { ...data, id: randomUUID(), owner_user_id: user.id },
+    });
   }
 
-  async create(data: Record<string, unknown>, userId?: string, role?: string) {
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      throw new BadRequestException('Request body must be an object.');
-    }
-    const payload: Record<string, unknown> = { ...data, id: typeof data.id === 'string' ? data.id : randomUUID() };
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    if (true && userId && role !== 'ADMIN') {
-      payload['owner_user_id'] = userId;
-    }
-    return this.db.create({ data: payload });
+  async update(id: string, dto: UpdateCompanyDto, user: AuthUser) {
+    await this.findOne(id, user);
+    return this.prisma.companies.update({
+      where: { id },
+      data: {
+        ...dto,
+        ...(dto.email !== undefined ? { email: dto.email.trim().toLowerCase() } : {}),
+      },
+    });
   }
 
-  async update(id: string, data: Record<string, unknown>, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    const payload: Record<string, unknown> = { ...data };
-    delete payload.id;
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    return this.db.update({ where: { id }, data: payload });
-  }
-
-  async remove(id: string, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    // Most JOBI entities support soft deletion; saved_jobs and some join tables do not.
-    if (['companies','company_branches','company_documents','jobs','resumes','education','experience','certifications','interviews'].includes('companies')) {
-      return this.db.update({ where: { id }, data: { deleted_at: new Date() } });
-    }
-    return this.db.delete({ where: { id } });
+  /** Soft delete. */
+  async remove(id: string, user: AuthUser) {
+    await this.findOne(id, user);
+    return this.prisma.companies.update({
+      where: { id },
+      data: { deleted_at: new Date() },
+    });
   }
 }

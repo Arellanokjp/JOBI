@@ -1,114 +1,78 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# JOBI Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+NestJS 12 + Prisma 7 (MySQL/MariaDB) API for a job marketplace with three roles:
+**JOB_SEEKER**, **EMPLOYER** and **ADMIN**. All routes live under `/api/v1`.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
-
-## Description
-
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
+## Setup
 
 ```bash
-$ npm install
+npm install
+cp .env.example .env        # fill in DATABASE_URL, JWT_SECRET, EMAIL_*
+npx prisma migrate deploy   # or `npx prisma db push` for a fresh dev database
+npm run db:seed             # creates the 3 roles (+ first admin if SEED_ADMIN_* is set)
+npm run start:dev
 ```
 
-## Compile and run the project
+**The seed step is required**: registration looks roles up by name and fails without them.
 
-```bash
-# development
-$ npm run start
+Requires Node ≥ 22.12 to run. The test suite needs Node ≥ 24.9 (Jest loads Nest 12's ESM-only
+packages natively there). Run `npm test` (unit) and `npm run test:e2e` (API tests with a mocked database).
 
-# watch mode
-$ npm run start:dev
+## How it works
 
-# production mode
-$ npm run start:prod
-```
+### Accounts
+1. `POST /auth/register/job-seeker` or `/auth/register/employer` → account is `PENDING`, a 6-digit OTP is emailed.
+2. `POST /auth/email/verify-otp` → email verified and the account becomes `ACTIVE`
+   (suspended/inactive accounts are never re-activated by verifying).
+3. `POST /auth/login` → JWT. The role is always re-read from the database, so role changes apply immediately.
+4. Password reset: `POST /auth/password-recovery/request` then `/confirm` (`email`, `otp`, `newPassword`).
+   The request endpoint answers identically whether or not the email exists.
 
-## Run tests
+OTPs: 10 min expiry, 5 wrong attempts lock a code, 60 s resend cooldown, 5 per hour.
 
-```bash
-# unit tests
-$ npm run test
+### Employer onboarding
+`create company` → (optional branches/documents) → `POST /company-verification` →
+admin `PATCH /company-verification/:id/review` (`APPROVED` | `REJECTED` + reason).
+Employers can create **draft** jobs immediately but can only **publish** once the company is `APPROVED`.
+An employer owns exactly one company; every employer-side query is scoped through `companies.owner_user_id`.
 
-# e2e tests
-$ npm run test:e2e
+### Hiring flow
+- Job seekers see only open jobs (`PUBLISHED`, not deleted, deadline not passed). Employers see their company's jobs; admins see all.
+- `POST /applications` (job seeker) – one application per job; answers to the job's form go in `responses[]`
+  and every required field must be answered. Withdrawing (`DELETE /applications/:id`) keeps the record and
+  re-applying reactivates it. Employers/admins change `status`; both sides receive notifications.
+- Employers may read a candidate's resume only when it is attached to an application for one of their jobs.
+- Interviews: employers schedule (VIDEO needs `meeting_url`, IN_PERSON needs `location`); internal `notes` are never shown to candidates.
 
-# test coverage
-$ npm run test:cov
-```
+### Application form answers by field type
+`TEXT/TEXTAREA/SELECT/RADIO` → `response_text` · `MULTISELECT` → `response_text` as JSON array string ·
+`CHECKBOX` → `"true"|"false"` · `NUMBER` → `response_number` · `DATE` → `response_date` · `FILE` → `file_url`.
 
-## Deployment
+## Permissions at a glance
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+| Area | JOB_SEEKER | EMPLOYER | ADMIN |
+|---|---|---|---|
+| `/job-categories`, `/job-types`, `/skills` | read | read | full |
+| `/companies` | approved companies (public fields) | own | all |
+| `/company-branches`, `/company-documents` | – | own company | all (+ document review) |
+| `/company-verification` | – | request / view own | review |
+| `/jobs` | open jobs | own company: full CRUD | all |
+| `/application-forms`, `/application-fields` | read (open jobs) | manage for own jobs | all |
+| `/applications`, `/application-responses` | own | applications to own jobs (status changes) | all |
+| `/resumes`, `/education`, `/experience`, `/certifications`, `/resume-skills` | own: full CRUD | read applicants' | read |
+| `/saved-jobs` | own | – | – |
+| `/interviews` | own (read) | own jobs: full | all |
+| `/notifications` | own | own | own + send to any user |
+| `/admin` (user management) | – | – | full |
+| `/audit-logs` | – | – | read-only |
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+Soft delete (`deleted_at`) is used wherever the schema has the column; other tables use hard delete and
+return `409` if other records still reference the row. Unique-constraint and foreign-key violations also map to `409`.
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
+## Status values
+The schema stores these as plain strings; they are defined in `src/common/constants.ts`
+(company/document: `PENDING|APPROVED|REJECTED`; job: `DRAFT|PUBLISHED|CLOSED`; application:
+`SUBMITTED|UNDER_REVIEW|SHORTLISTED|INTERVIEW_SCHEDULED|OFFERED|HIRED|REJECTED|WITHDRAWN`).
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Observability
-
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
-
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
-
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+## Scripts
+`start:dev` · `build` · `start:prod` · `db:generate` · `db:seed` · `test` · `test:e2e` · `lint`

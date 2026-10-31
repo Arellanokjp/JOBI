@@ -1,66 +1,118 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
+
 import { PrismaService } from '../prisma/prisma.service';
+import type { AuthUser } from '../common/auth-user';
+import { APPLICATION_STATUS } from '../common/constants';
+import { CreateApplicationResponseDto } from './dto/create-application-responses.dto';
+import { UpdateApplicationResponseDto } from './dto/update-application-responses.dto';
+import { toResponseColumns } from './response-value.util';
 
 @Injectable()
 export class ApplicationResponsesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private get db(): any {
-    return (this.prisma as any).application_responses;
+  /** Job seekers: answers on their own applications. Employers: on applications to their jobs. */
+  private visibleWhere(user: AuthUser): Prisma.application_responsesWhereInput {
+    switch (user.role) {
+      case 'ADMIN':
+        return {};
+      case 'EMPLOYER':
+        return { applications: { jobs: { companies: { owner_user_id: user.id } } } };
+      default:
+        return { applications: { applicant_user_id: user.id } };
+    }
   }
 
-  async findAll(userId?: string, role?: string) {
-    const where: Record<string, unknown> = {};
-    if (false && userId && role !== 'ADMIN') {
-      where['id'] = userId;
-    }
-    if ('deleted_at' in (this.db.fields ?? {})) {
-      where['deleted_at'] = null;
-    }
-    return this.db.findMany({ where, orderBy: { created_at: 'desc' } });
+  findAll(user: AuthUser, applicationId?: string) {
+    return this.prisma.application_responses.findMany({
+      where: { ...this.visibleWhere(user), ...(applicationId ? { application_id: applicationId } : {}) },
+      include: { application_fields: true },
+      orderBy: [{ application_id: 'asc' }, { application_fields: { display_order: 'asc' } }],
+    });
   }
 
-  async findOne(id: string, userId?: string, role?: string) {
-    if (!id) throw new BadRequestException('A valid ID is required.');
-    const item = await this.db.findUnique({ where: { id } });
-    if (!item) throw new NotFoundException('Record not found.');
-    if (false && role !== 'ADMIN' && userId && item['id'] !== userId) {
-      throw new ForbiddenException('You cannot access this record.');
-    }
-    return item;
+  async findOne(id: string, user: AuthUser) {
+    const response = await this.prisma.application_responses.findFirst({
+      where: { id, ...this.visibleWhere(user) },
+      include: { application_fields: true },
+    });
+    if (!response) throw new NotFoundException('Response not found.');
+    return response;
   }
 
-  async create(data: Record<string, unknown>, userId?: string, role?: string) {
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      throw new BadRequestException('Request body must be an object.');
+  /** Answers may only be added or changed while the application is still SUBMITTED. */
+  private assertEditable(status: string) {
+    if (status !== APPLICATION_STATUS.SUBMITTED) {
+      throw new ConflictException('Responses can only be changed while the application is SUBMITTED.');
     }
-    const payload: Record<string, unknown> = { ...data, id: typeof data.id === 'string' ? data.id : randomUUID() };
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    if (false && userId && role !== 'ADMIN') {
-      payload['id'] = userId;
-    }
-    return this.db.create({ data: payload });
   }
 
-  async update(id: string, data: Record<string, unknown>, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    const payload: Record<string, unknown> = { ...data };
-    delete payload.id;
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    return this.db.update({ where: { id }, data: payload });
+  async create(dto: CreateApplicationResponseDto, user: AuthUser) {
+    const application = await this.prisma.applications.findFirst({
+      where: { id: dto.application_id, applicant_user_id: user.id },
+      select: { id: true, status: true, jobs: { select: { application_forms: { select: { id: true } } } } },
+    });
+    if (!application) throw new NotFoundException('Application not found.');
+    this.assertEditable(application.status);
+
+    const formId = application.jobs.application_forms?.id;
+    const field = formId
+      ? await this.prisma.application_fields.findFirst({
+          where: { id: dto.application_field_id, application_form_id: formId },
+        })
+      : null;
+    if (!field) {
+      throw new BadRequestException('application_field_id does not belong to this job\'s application form.');
+    }
+
+    const existing = await this.prisma.application_responses.findUnique({
+      where: {
+        application_id_application_field_id: {
+          application_id: dto.application_id,
+          application_field_id: dto.application_field_id,
+        },
+      },
+      select: { id: true },
+    });
+    if (existing) throw new ConflictException('This field has already been answered; update the existing response.');
+
+    return this.prisma.application_responses.create({
+      data: {
+        id: randomUUID(),
+        application_id: dto.application_id,
+        application_field_id: dto.application_field_id,
+        ...toResponseColumns(field, dto),
+      },
+    });
   }
 
-  async remove(id: string, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    // Most JOBI entities support soft deletion; saved_jobs and some join tables do not.
-    if (['companies','company_branches','company_documents','jobs','resumes','education','experience','certifications','interviews'].includes('application_responses')) {
-      return this.db.update({ where: { id }, data: { deleted_at: new Date() } });
+  async update(id: string, dto: UpdateApplicationResponseDto, user: AuthUser) {
+    const response = await this.prisma.application_responses.findFirst({
+      where: { id, applications: { applicant_user_id: user.id } },
+      include: { applications: { select: { status: true } }, application_fields: true },
+    });
+    if (!response) throw new NotFoundException('Response not found.');
+    this.assertEditable(response.applications.status);
+
+    return this.prisma.application_responses.update({
+      where: { id },
+      data: toResponseColumns(response.application_fields, dto),
+    });
+  }
+
+  async remove(id: string, user: AuthUser) {
+    const response = await this.prisma.application_responses.findFirst({
+      where: { id, applications: { applicant_user_id: user.id } },
+      include: { applications: { select: { status: true } }, application_fields: true },
+    });
+    if (!response) throw new NotFoundException('Response not found.');
+    this.assertEditable(response.applications.status);
+
+    if (response.application_fields.is_required) {
+      throw new BadRequestException('A required field\'s answer cannot be removed; update it instead.');
     }
-    return this.db.delete({ where: { id } });
+    return this.prisma.application_responses.delete({ where: { id } });
   }
 }

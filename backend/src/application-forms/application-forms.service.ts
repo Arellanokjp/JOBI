@@ -1,66 +1,115 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
+
 import { PrismaService } from '../prisma/prisma.service';
+import { openJobWhere } from '../jobs/jobs.service';
+import type { AuthUser } from '../common/auth-user';
+import { CreateApplicationFormDto } from './dto/create-application-forms.dto';
+import { UpdateApplicationFormDto } from './dto/update-application-forms.dto';
+
+const formInclude = {
+  application_fields: { orderBy: { display_order: 'asc' } },
+} satisfies Prisma.application_formsInclude;
 
 @Injectable()
 export class ApplicationFormsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private get db(): any {
-    return (this.prisma as any).application_forms;
+  /**
+   * Admins: all forms. Employers: forms of their own jobs.
+   * Job seekers: active forms of jobs they can currently apply to.
+   */
+  private visibleWhere(user: AuthUser): Prisma.application_formsWhereInput {
+    switch (user.role) {
+      case 'ADMIN':
+        return { jobs: { deleted_at: null } };
+      case 'EMPLOYER':
+        return { jobs: { deleted_at: null, companies: { owner_user_id: user.id } } };
+      default:
+        return { is_active: true, jobs: openJobWhere() };
+    }
   }
 
-  async findAll(userId?: string, role?: string) {
-    const where: Record<string, unknown> = {};
-    if (false && userId && role !== 'ADMIN') {
-      where['id'] = userId;
-    }
-    if ('deleted_at' in (this.db.fields ?? {})) {
-      where['deleted_at'] = null;
-    }
-    return this.db.findMany({ where, orderBy: { created_at: 'desc' } });
+  findAll(user: AuthUser) {
+    return this.prisma.application_forms.findMany({
+      where: this.visibleWhere(user),
+      include: formInclude,
+      orderBy: { created_at: 'desc' },
+    });
   }
 
-  async findOne(id: string, userId?: string, role?: string) {
-    if (!id) throw new BadRequestException('A valid ID is required.');
-    const item = await this.db.findUnique({ where: { id } });
-    if (!item) throw new NotFoundException('Record not found.');
-    if (false && role !== 'ADMIN' && userId && item['id'] !== userId) {
-      throw new ForbiddenException('You cannot access this record.');
-    }
-    return item;
+  async findOne(id: string, user: AuthUser) {
+    const form = await this.prisma.application_forms.findFirst({
+      where: { id, ...this.visibleWhere(user) },
+      include: formInclude,
+    });
+    if (!form) throw new NotFoundException('Application form not found.');
+    return form;
   }
 
-  async create(data: Record<string, unknown>, userId?: string, role?: string) {
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      throw new BadRequestException('Request body must be an object.');
-    }
-    const payload: Record<string, unknown> = { ...data, id: typeof data.id === 'string' ? data.id : randomUUID() };
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    if (false && userId && role !== 'ADMIN') {
-      payload['id'] = userId;
-    }
-    return this.db.create({ data: payload });
+  /** Convenient lookup for the apply screen: the form of a given job. */
+  async findByJob(jobId: string, user: AuthUser) {
+    const form = await this.prisma.application_forms.findFirst({
+      where: { job_id: jobId, ...this.visibleWhere(user) },
+      include: formInclude,
+    });
+    if (!form) throw new NotFoundException('This job has no application form.');
+    return form;
   }
 
-  async update(id: string, data: Record<string, unknown>, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    const payload: Record<string, unknown> = { ...data };
-    delete payload.id;
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    return this.db.update({ where: { id }, data: payload });
+  async create(dto: CreateApplicationFormDto, user: AuthUser) {
+    const job = await this.prisma.jobs.findFirst({
+      where: {
+        id: dto.job_id,
+        deleted_at: null,
+        ...(user.role === 'ADMIN' ? {} : { companies: { owner_user_id: user.id } }),
+      },
+      select: { id: true },
+    });
+    if (!job) throw new NotFoundException('Job not found.');
+
+    // job_id is unique: a job has at most one form.
+    const existing = await this.prisma.application_forms.findUnique({
+      where: { job_id: dto.job_id },
+      select: { id: true },
+    });
+    if (existing) throw new ConflictException('This job already has an application form.');
+
+    return this.prisma.application_forms.create({
+      data: { ...dto, id: randomUUID() },
+      include: formInclude,
+    });
   }
 
-  async remove(id: string, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    // Most JOBI entities support soft deletion; saved_jobs and some join tables do not.
-    if (['companies','company_branches','company_documents','jobs','resumes','education','experience','certifications','interviews'].includes('application_forms')) {
-      return this.db.update({ where: { id }, data: { deleted_at: new Date() } });
+  async update(id: string, dto: UpdateApplicationFormDto, user: AuthUser) {
+    await this.findOne(id, user);
+    return this.prisma.application_forms.update({
+      where: { id },
+      data: dto,
+      include: formInclude,
+    });
+  }
+
+  /**
+   * Hard delete (the table has no deleted_at). A form that already collected
+   * answers cannot be deleted; deactivate it instead.
+   */
+  async remove(id: string, user: AuthUser) {
+    await this.findOne(id, user);
+
+    const answers = await this.prisma.application_responses.count({
+      where: { application_fields: { application_form_id: id } },
+    });
+    if (answers > 0) {
+      throw new ConflictException(
+        'This form already has applicant responses. Set is_active to false instead of deleting it.',
+      );
     }
-    return this.db.delete({ where: { id } });
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.application_fields.deleteMany({ where: { application_form_id: id } });
+      return tx.application_forms.delete({ where: { id } });
+    });
   }
 }

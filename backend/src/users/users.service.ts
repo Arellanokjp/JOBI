@@ -2,7 +2,6 @@ import {
   Injectable,
   NotFoundException,
   ConflictException,
-  BadRequestException,
 } from '@nestjs/common';
 
 import { PrismaService } from '../prisma/prisma.service';
@@ -10,8 +9,6 @@ import { PrismaService } from '../prisma/prisma.service';
 
 import { UpdateUserDto } from './dto/update-user.dto';
 
-import * as bcrypt from 'bcrypt';
-import { randomUUID } from 'crypto';
 
 @Injectable()
 export class UsersService {
@@ -118,7 +115,7 @@ export class UsersService {
   }
 
   if (email !== undefined) {
-    data.email = email;
+    data.email = email.trim().toLowerCase();
   }
 
   if (phone_number !== undefined) {

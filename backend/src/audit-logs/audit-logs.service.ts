@@ -1,66 +1,69 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
+
 import { PrismaService } from '../prisma/prisma.service';
+import { pageArgs } from '../common/pagination.dto';
+import { CreateAuditLogInput } from './dto/create-audit-logs.dto';
+import { ListAuditLogsQueryDto } from './dto/list-audit-logs.dto';
 
 @Injectable()
 export class AuditLogsService {
+  private readonly logger = new Logger(AuditLogsService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
-  private get db(): any {
-    return (this.prisma as any).audit_logs;
+  /**
+   * Append an audit entry. Best-effort: a failure to write the log is reported
+   * but never breaks the business operation that triggered it.
+   */
+  async record(input: CreateAuditLogInput): Promise<void> {
+    try {
+      await this.prisma.audit_logs.create({
+        data: {
+          id: randomUUID(),
+          user_id: input.user_id ?? null,
+          action: input.action,
+          entity_type: input.entity_type,
+          entity_id: input.entity_id ?? null,
+          description: input.description ?? null,
+          ip_address: input.ip_address ?? null,
+          user_agent: input.user_agent ?? null,
+        },
+      });
+    } catch (error) {
+      this.logger.error(
+        `Failed to write audit log "${input.action}": ${(error as Error).message}`,
+      );
+    }
   }
 
-  async findAll(userId?: string, role?: string) {
-    const where: Record<string, unknown> = {};
-    if (false && userId && role !== 'ADMIN') {
-      where['id'] = userId;
-    }
-    if ('deleted_at' in (this.db.fields ?? {})) {
-      where['deleted_at'] = null;
-    }
-    return this.db.findMany({ where, orderBy: { created_at: 'desc' } });
+  findAll(query: ListAuditLogsQueryDto) {
+    const where: Prisma.audit_logsWhereInput = {
+      ...(query.user_id ? { user_id: query.user_id } : {}),
+      ...(query.action ? { action: query.action } : {}),
+      ...(query.entity_type ? { entity_type: query.entity_type } : {}),
+      ...(query.entity_id ? { entity_id: query.entity_id } : {}),
+      ...(query.from || query.to
+        ? {
+            created_at: {
+              ...(query.from ? { gte: query.from } : {}),
+              ...(query.to ? { lte: query.to } : {}),
+            },
+          }
+        : {}),
+    };
+
+    return this.prisma.audit_logs.findMany({
+      where,
+      orderBy: { created_at: 'desc' },
+      ...pageArgs(query),
+    });
   }
 
-  async findOne(id: string, userId?: string, role?: string) {
-    if (!id) throw new BadRequestException('A valid ID is required.');
-    const item = await this.db.findUnique({ where: { id } });
-    if (!item) throw new NotFoundException('Record not found.');
-    if (false && role !== 'ADMIN' && userId && item['id'] !== userId) {
-      throw new ForbiddenException('You cannot access this record.');
-    }
-    return item;
-  }
-
-  async create(data: Record<string, unknown>, userId?: string, role?: string) {
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      throw new BadRequestException('Request body must be an object.');
-    }
-    const payload: Record<string, unknown> = { ...data, id: typeof data.id === 'string' ? data.id : randomUUID() };
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    if (false && userId && role !== 'ADMIN') {
-      payload['id'] = userId;
-    }
-    return this.db.create({ data: payload });
-  }
-
-  async update(id: string, data: Record<string, unknown>, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    const payload: Record<string, unknown> = { ...data };
-    delete payload.id;
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    return this.db.update({ where: { id }, data: payload });
-  }
-
-  async remove(id: string, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    // Most JOBI entities support soft deletion; saved_jobs and some join tables do not.
-    if (['companies','company_branches','company_documents','jobs','resumes','education','experience','certifications','interviews'].includes('audit_logs')) {
-      return this.db.update({ where: { id }, data: { deleted_at: new Date() } });
-    }
-    return this.db.delete({ where: { id } });
+  async findOne(id: string) {
+    const log = await this.prisma.audit_logs.findUnique({ where: { id } });
+    if (!log) throw new NotFoundException('Audit log not found.');
+    return log;
   }
 }

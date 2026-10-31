@@ -1,70 +1,116 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
+
 import { PrismaService } from '../prisma/prisma.service';
+import { AccessService } from '../common/access.service';
+import { AuditLogsService } from '../audit-logs/audit-logs.service';
+import type { AuthUser } from '../common/auth-user';
+import { DOCUMENT_STATUS } from '../common/constants';
+import { CreateCompanyDocumentDto } from './dto/create-company-documents.dto';
+import { ReviewCompanyDocumentDto, UpdateCompanyDocumentDto } from './dto/update-company-documents.dto';
 
 @Injectable()
 export class CompanyDocumentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly access: AccessService,
+    private readonly audit: AuditLogsService,
+  ) {}
 
-  private get db(): any {
-    return (this.prisma as any).company_documents;
+  private visibleWhere(user: AuthUser): Prisma.company_documentsWhereInput {
+    return user.role === 'ADMIN'
+      ? { deleted_at: null }
+      : { deleted_at: null, companies: { owner_user_id: user.id, deleted_at: null } };
   }
 
-  private scopeByOwner(userId: string, where: Record<string, unknown> = {}) {
-    return { ...where, company_id: userId };
+  findAll(user: AuthUser, companyId?: string) {
+    return this.prisma.company_documents.findMany({
+      where: { ...this.visibleWhere(user), ...(companyId ? { company_id: companyId } : {}) },
+      orderBy: { uploaded_at: 'desc' },
+    });
   }
 
-  async findAll(userId?: string, role?: string) {
-    const where: Record<string, unknown> = {};
-    if (true && userId && role !== 'ADMIN') {
-      where['company_id'] = userId;
-    }
-    if ('deleted_at' in (this.db.fields ?? {})) {
-      where['deleted_at'] = null;
-    }
-    return this.db.findMany({ where, orderBy: { created_at: 'desc' } });
+  async findOne(id: string, user: AuthUser) {
+    const doc = await this.prisma.company_documents.findFirst({
+      where: { id, ...this.visibleWhere(user) },
+    });
+    if (!doc) throw new NotFoundException('Document not found.');
+    return doc;
   }
 
-  async findOne(id: string, userId?: string, role?: string) {
-    if (!id) throw new BadRequestException('A valid ID is required.');
-    const item = await this.db.findUnique({ where: { id } });
-    if (!item) throw new NotFoundException('Record not found.');
-    if (true && role !== 'ADMIN' && userId && item['company_id'] !== userId) {
-      throw new ForbiddenException('You cannot access this record.');
+  async create(dto: CreateCompanyDocumentDto, user: AuthUser) {
+    let companyId: string;
+    if (user.role === 'ADMIN') {
+      if (!dto.company_id) throw new BadRequestException('company_id is required.');
+      companyId = dto.company_id;
+    } else {
+      companyId = (await this.access.getOwnCompany(user.id)).id;
     }
-    return item;
+
+    const { company_id: _ignored, expires_at, ...fields } = dto;
+    void _ignored;
+
+    return this.prisma.company_documents.create({
+      data: {
+        ...fields,
+        id: randomUUID(),
+        company_id: companyId,
+        expires_at: expires_at ? new Date(expires_at) : null,
+        document_status: DOCUMENT_STATUS.PENDING,
+      },
+    });
   }
 
-  async create(data: Record<string, unknown>, userId?: string, role?: string) {
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      throw new BadRequestException('Request body must be an object.');
-    }
-    const payload: Record<string, unknown> = { ...data, id: typeof data.id === 'string' ? data.id : randomUUID() };
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    if (true && userId && role !== 'ADMIN') {
-      payload['company_id'] = userId;
-    }
-    return this.db.create({ data: payload });
+  async update(id: string, dto: UpdateCompanyDocumentDto, user: AuthUser) {
+    await this.findOne(id, user);
+    const { expires_at, ...fields } = dto;
+
+    return this.prisma.company_documents.update({
+      where: { id },
+      data: {
+        ...fields,
+        ...(expires_at !== undefined ? { expires_at: new Date(expires_at) } : {}),
+        // Replacing the file or its details sends the document back for review.
+        document_status: DOCUMENT_STATUS.PENDING,
+        rejection_reason: null,
+      },
+    });
   }
 
-  async update(id: string, data: Record<string, unknown>, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    const payload: Record<string, unknown> = { ...data };
-    delete payload.id;
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    return this.db.update({ where: { id }, data: payload });
+  async review(id: string, dto: ReviewCompanyDocumentDto, admin: AuthUser) {
+    await this.findOne(id, admin);
+
+    if (dto.document_status === DOCUMENT_STATUS.REJECTED && !dto.rejection_reason) {
+      throw new BadRequestException('A rejection_reason is required when rejecting a document.');
+    }
+
+    const updated = await this.prisma.company_documents.update({
+      where: { id },
+      data: {
+        document_status: dto.document_status,
+        rejection_reason:
+          dto.document_status === DOCUMENT_STATUS.REJECTED ? dto.rejection_reason : null,
+      },
+    });
+
+    await this.audit.record({
+      user_id: admin.id,
+      action: `COMPANY_DOCUMENT_${dto.document_status}`,
+      entity_type: 'company_documents',
+      entity_id: id,
+      description: dto.rejection_reason ?? null,
+    });
+
+    return updated;
   }
 
-  async remove(id: string, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    // Most JOBI entities support soft deletion; saved_jobs and some join tables do not.
-    if (['companies','company_branches','company_documents','jobs','resumes','education','experience','certifications','interviews'].includes('company_documents')) {
-      return this.db.update({ where: { id }, data: { deleted_at: new Date() } });
-    }
-    return this.db.delete({ where: { id } });
+  /** Soft delete. */
+  async remove(id: string, user: AuthUser) {
+    await this.findOne(id, user);
+    return this.prisma.company_documents.update({
+      where: { id },
+      data: { deleted_at: new Date() },
+    });
   }
 }

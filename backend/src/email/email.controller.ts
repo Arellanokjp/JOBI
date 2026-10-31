@@ -5,6 +5,7 @@ import {
   UseGuards,
   Req,
   ForbiddenException,
+  BadRequestException,
 } from '@nestjs/common';
 import { Request } from 'express';
 import { EmailService } from './email.service';
@@ -35,7 +36,7 @@ export class EmailController {
       typeof body.recipient !== 'string' ||
       !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.recipient)
     ) {
-      throw new ForbiddenException('Provide a valid recipient email address.');
+      throw new BadRequestException('Provide a valid recipient email address.');
     }
 
     await this.emailService.sendOtpEmail(

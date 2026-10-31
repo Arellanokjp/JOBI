@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { CommonModule } from './common/access.service';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { UsersModule } from './users/users.module';
@@ -32,6 +34,8 @@ import { PasswordRecoveryModule } from './password-recovery/password-recovery.mo
 
 @Module({
   imports: [
+    ConfigModule.forRoot({ isGlobal: true }),
+    CommonModule,
     UsersModule, 
     PrismaModule, 
     AuthModule, 

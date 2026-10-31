@@ -1,66 +1,102 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import type { Prisma } from '@prisma/client';
 import { randomUUID } from 'crypto';
+
 import { PrismaService } from '../prisma/prisma.service';
+import { AccessService } from '../common/access.service';
+import { assertDateOrder, toDate } from '../common/dates';
+import type { AuthUser } from '../common/auth-user';
+import { CreateCertificationDto } from './dto/create-certifications.dto';
+import { UpdateCertificationDto } from './dto/update-certifications.dto';
 
 @Injectable()
 export class CertificationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly access: AccessService,
+  ) {}
 
-  private get db(): any {
-    return (this.prisma as any).certifications;
+  /** Seekers: entries on their resume. Employers: on resumes attached to their applicants. */
+  private visibleWhere(user: AuthUser): Prisma.certificationsWhereInput {
+    switch (user.role) {
+      case 'ADMIN':
+        return { deleted_at: null, resumes: { deleted_at: null } };
+      case 'EMPLOYER':
+        return { deleted_at: null, resumes: this.access.resumesVisibleToEmployer(user.id) };
+      default:
+        return { deleted_at: null, resumes: { user_id: user.id, deleted_at: null } };
+    }
   }
 
-  async findAll(userId?: string, role?: string) {
-    const where: Record<string, unknown> = {};
-    if (false && userId && role !== 'ADMIN') {
-      where['id'] = userId;
-    }
-    if ('deleted_at' in (this.db.fields ?? {})) {
-      where['deleted_at'] = null;
-    }
-    return this.db.findMany({ where, orderBy: { created_at: 'desc' } });
+  findAll(user: AuthUser) {
+    return this.prisma.certifications.findMany({
+      where: this.visibleWhere(user),
+      orderBy: { created_at: 'desc' },
+    });
   }
 
-  async findOne(id: string, userId?: string, role?: string) {
-    if (!id) throw new BadRequestException('A valid ID is required.');
-    const item = await this.db.findUnique({ where: { id } });
+  async findOne(id: string, user: AuthUser) {
+    const item = await this.prisma.certifications.findFirst({ where: { id, ...this.visibleWhere(user) } });
     if (!item) throw new NotFoundException('Record not found.');
-    if (false && role !== 'ADMIN' && userId && item['id'] !== userId) {
-      throw new ForbiddenException('You cannot access this record.');
-    }
     return item;
   }
 
-  async create(data: Record<string, unknown>, userId?: string, role?: string) {
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-      throw new BadRequestException('Request body must be an object.');
-    }
-    const payload: Record<string, unknown> = { ...data, id: typeof data.id === 'string' ? data.id : randomUUID() };
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    if (false && userId && role !== 'ADMIN') {
-      payload['id'] = userId;
-    }
-    return this.db.create({ data: payload });
+  /** The resume to attach to: the one named in the body (must be yours) or your own. */
+  private async resolveResumeId(resumeId: string | undefined, user: AuthUser): Promise<string> {
+    if (!resumeId) return (await this.access.getOwnResume(user.id)).id;
+    const resume = await this.prisma.resumes.findFirst({
+      where: { id: resumeId, user_id: user.id, deleted_at: null },
+      select: { id: true },
+    });
+    if (!resume) throw new BadRequestException('resume_id must be your own resume.');
+    return resume.id;
   }
 
-  async update(id: string, data: Record<string, unknown>, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    const payload: Record<string, unknown> = { ...data };
-    delete payload.id;
-    delete payload.created_at;
-    delete payload.updated_at;
-    delete payload.deleted_at;
-    return this.db.update({ where: { id }, data: payload });
+  /** Write access: only the resume's owner. */
+  private async ownedItem(id: string, user: AuthUser) {
+    const item = await this.prisma.certifications.findFirst({
+      where: { id, deleted_at: null, resumes: { user_id: user.id, deleted_at: null } },
+    });
+    if (!item) throw new NotFoundException('Record not found.');
+    return item;
   }
 
-  async remove(id: string, userId?: string, role?: string) {
-    await this.findOne(id, userId, role);
-    // Most JOBI entities support soft deletion; saved_jobs and some join tables do not.
-    if (['companies','company_branches','company_documents','jobs','resumes','education','experience','certifications','interviews'].includes('certifications')) {
-      return this.db.update({ where: { id }, data: { deleted_at: new Date() } });
-    }
-    return this.db.delete({ where: { id } });
+  /** Soft delete. */
+  async remove(id: string, user: AuthUser) {
+    await this.ownedItem(id, user);
+    return this.prisma.certifications.update({ where: { id }, data: { deleted_at: new Date() } });
+  }
+
+  async create(dto: CreateCertificationDto, user: AuthUser) {
+    const resumeId = await this.resolveResumeId(dto.resume_id, user);
+    assertDateOrder(dto.issue_date, dto.expiry_date, 'issue_date', 'expiry_date');
+
+    const { resume_id: _ignored, issue_date, expiry_date, ...fields } = dto;
+    void _ignored;
+    return this.prisma.certifications.create({
+      data: {
+        ...fields,
+        id: randomUUID(),
+        resume_id: resumeId,
+        issue_date: toDate(issue_date),
+        expiry_date: toDate(expiry_date),
+      },
+    });
+  }
+
+  async update(id: string, dto: UpdateCertificationDto, user: AuthUser) {
+    const existing = await this.ownedItem(id, user);
+    assertDateOrder(
+      dto.issue_date ?? existing.issue_date,
+      dto.expiry_date ?? existing.expiry_date,
+      'issue_date',
+      'expiry_date',
+    );
+
+    const { issue_date, expiry_date, ...fields } = dto;
+    return this.prisma.certifications.update({
+      where: { id },
+      data: { ...fields, issue_date: toDate(issue_date), expiry_date: toDate(expiry_date) },
+    });
   }
 }

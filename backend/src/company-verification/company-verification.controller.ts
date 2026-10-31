@@ -1,48 +1,44 @@
-﻿import { Body, Controller, Delete, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
-import type { Request } from 'express';
+import {
+  Body, Controller, Get, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards,
+} from '@nestjs/common';
 import { CompanyVerificationService } from './company-verification.service';
-import { CreateResourceDto } from './dto/create-company-verification.dto';
-import { UpdateResourceDto } from './dto/update-company-verification.dto';
-import { JobiJwtAuthGuard } from '../common/jobi-jwt-auth.guard';
-import { jobiRole, jobiUserId, JobiRequestUser } from '../common/jobi-request-user';
+import { ListVerificationQueryDto, ReviewVerificationDto } from './dto/update-company-verification.dto';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../auth/decorators/roles.decorator';
+import { CurrentUser, type AuthUser } from '../common/auth-user';
 
 @Controller('company-verification')
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles('EMPLOYER', 'ADMIN')
 export class CompanyVerificationController {
   constructor(private readonly service: CompanyVerificationService) {}
 
   @Get()
-  @UseGuards(JobiJwtAuthGuard)
-  findAll(@Req() req: Request) {
-    const user = (req as any).user as JobiRequestUser | undefined;
-    return this.service.findAll(jobiUserId(user), jobiRole(user));
+  findAll(@CurrentUser() user: AuthUser, @Query() query: ListVerificationQueryDto) {
+    return this.service.findAll(user, query.status);
   }
 
   @Get(':id')
-  @UseGuards(JobiJwtAuthGuard)
-  findOne(@Param('id') id: string, @Req() req: Request) {
-    const user = (req as any).user as JobiRequestUser | undefined;
-    return this.service.findOne(id, jobiUserId(user), jobiRole(user));
+  findOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
+    return this.service.findOne(id, user);
   }
 
+  /** Employer asks for their company to be reviewed. */
   @Post()
-  @UseGuards(JobiJwtAuthGuard)
-  create(@Body() dto: CreateResourceDto, @Req() req: Request) {
-    const user = (req as any).user as JobiRequestUser | undefined;
-    return this.service.create(dto as Record<string, unknown>, jobiUserId(user), jobiRole(user));
+  @Roles('EMPLOYER')
+  request(@CurrentUser() user: AuthUser) {
+    return this.service.request(user);
   }
 
-  @Patch(':id')
-  @UseGuards(JobiJwtAuthGuard)
-  update(@Param('id') id: string, @Body() dto: UpdateResourceDto, @Req() req: Request) {
-    const user = (req as any).user as JobiRequestUser | undefined;
-    return this.service.update(id, dto as Record<string, unknown>, jobiUserId(user), jobiRole(user));
-  }
-
-  @Delete(':id')
-  @UseGuards(JobiJwtAuthGuard)
-  remove(@Param('id') id: string, @Req() req: Request) {
-    const user = (req as any).user as JobiRequestUser | undefined;
-    return this.service.remove(id, jobiUserId(user), jobiRole(user));
+  /** Administrator approves or rejects. */
+  @Patch(':id/review')
+  @Roles('ADMIN')
+  review(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReviewVerificationDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.service.review(id, dto, user);
   }
 }
-
