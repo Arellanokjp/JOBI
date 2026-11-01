@@ -13,6 +13,7 @@ export default function Login() {
   const form = useForm({ email: '', password: '' });
   const action = useAction();
   const [needsVerify, setNeedsVerify] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -26,7 +27,7 @@ export default function Login() {
     <AuthShell title="Sign in">
       <form className="stack" onSubmit={submit}>
         <Field label="Email"><input type="email" autoComplete="email" required {...form.bind('email')} checked /></Field>
-        <Field label="Password"><input type="password" autoComplete="current-password" minLength={8} required {...form.bind('password')} /></Field>
+        <Field label="Password"><input type={showPassword ? "text" : "password"} placeholder="Enter your password" minLength={8} required {...form.bind('password')} /></Field>
         <FormError message={action.error} />
         {(needsVerify || /verify your email/i.test(action.error ?? '')) && (
           <p className="small">Your email isn't verified yet. <Link to={`/verify?email=${encodeURIComponent(form.values.email)}`}>Enter your code</Link>.</p>

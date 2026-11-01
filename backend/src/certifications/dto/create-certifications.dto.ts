@@ -2,7 +2,8 @@ import { IsDateString, IsNotEmpty, IsOptional, IsString, IsUUID, MaxLength } fro
 
 export class CreateCertificationDto {
   /** Optional: defaults to the caller's own resume. */
-  @IsOptional() @IsUUID()
+  @IsOptional()
+ @IsUUID()
   resume_id?: string;
 
   @IsString() @IsNotEmpty() @MaxLength(255)
