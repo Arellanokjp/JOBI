@@ -41,9 +41,9 @@ export default function Register() {
           </label>
         </div>
         <div className="form-grid">
-          <Field label="First name"><input required maxLength={50} autoComplete="given-name" {...form.bind('first_name')} /></Field>
-          <Field label="Last name"><input required maxLength={50} autoComplete="family-name" {...form.bind('last_name')} /></Field>
-          <Field label="Email" wide><input type="email" required autoComplete="email" {...form.bind('email')} /></Field>
+          <Field label="First name"><input placeholder="Enter your first name" required maxLength={50} autoComplete="given-name" {...form.bind('first_name')} /></Field>
+          <Field label="Last name"><input placeholder="Enter your last name" required maxLength={50} autoComplete="family-name" {...form.bind('last_name')} /></Field>
+          <Field label="Email" wide><input type="email" placeholder="Enter your email" required {...form.bind('email')} /></Field>
           <Field label="Phone number" wide><input type="tel" required maxLength={20} autoComplete="tel" placeholder="+254 700 000000" {...form.bind('phone_number')} /></Field>
           <Field label="Password" hint="At least 8 characters." wide><input type={showPassword ? "text" : "password"} placeholder="Enter your password" minLength={8} required {...form.bind('password')} /></Field>
         </div>
