@@ -68,6 +68,7 @@ export class JobsService {
         ],
       });
     }
+    
     if (query.category_id) and.push({ category_id: query.category_id });
     if (query.job_type_id) and.push({ job_type_id: query.job_type_id });
     if (query.company_id) and.push({ company_id: query.company_id });
