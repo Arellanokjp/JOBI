@@ -26,7 +26,7 @@ export default function Login() {
   return (
     <AuthShell title="Sign in">
       <form className="stack" onSubmit={submit}>
-        <Field label="Email"><input type="email" autoComplete="email" required {...form.bind('email')} checked /></Field>
+        <Field label="Email"><input type="email" autoComplete="email" placeholder="Enter your email" required {...form.bind('email')} checked /></Field>
         <Field label="Password"><input type={showPassword ? "text" : "password"} placeholder="Enter your password" minLength={8} required {...form.bind('password')} /> <label>
         <input
           type="checkbox"
