@@ -45,7 +45,14 @@ export default function Register() {
           <Field label="Last name"><input placeholder="Enter your last name" required maxLength={50} autoComplete="family-name" {...form.bind('last_name')} /></Field>
           <Field label="Email" wide><input type="email" placeholder="Enter your email" required {...form.bind('email')} /></Field>
           <Field label="Phone number" wide><input type="tel" required maxLength={20} autoComplete="tel" placeholder="+254 700 000000" {...form.bind('phone_number')} /></Field>
-          <Field label="Password" hint="At least 8 characters." wide><input type={showPassword ? "text" : "password"} placeholder="Enter your password" minLength={8} required {...form.bind('password')} /></Field>
+          <Field label="Password" hint="At least 8 characters." wide><input type={showPassword ? "text" : "password"} placeholder="Enter your password" minLength={8} required {...form.bind('password')} /> <label>
+        <input
+          type="checkbox"
+          checked={showPassword}
+          onChange={() => setShowPassword(!showPassword)}
+        />
+        Show Password
+      </label></Field>
         </div>
         <FormError message={action.error} />
         <Button type="submit" busy={action.busy}>Create account</Button>

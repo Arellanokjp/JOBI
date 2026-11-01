@@ -27,7 +27,14 @@ export default function Login() {
     <AuthShell title="Sign in">
       <form className="stack" onSubmit={submit}>
         <Field label="Email"><input type="email" autoComplete="email" required {...form.bind('email')} checked /></Field>
-        <Field label="Password"><input type={showPassword ? "text" : "password"} placeholder="Enter your password" minLength={8} required {...form.bind('password')} /></Field>
+        <Field label="Password"><input type={showPassword ? "text" : "password"} placeholder="Enter your password" minLength={8} required {...form.bind('password')} /> <label>
+        <input
+          type="checkbox"
+          checked={showPassword}
+          onChange={() => setShowPassword(!showPassword)}
+        />
+        Show Password
+      </label></Field>
         <FormError message={action.error} />
         {(needsVerify || /verify your email/i.test(action.error ?? '')) && (
           <p className="small">Your email isn't verified yet. <Link to={`/verify?email=${encodeURIComponent(form.values.email)}`}>Enter your code</Link>.</p>
