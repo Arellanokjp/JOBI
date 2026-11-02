@@ -28,7 +28,6 @@ export class OtpService {
     private readonly emailService: EmailService,
   ) {}
 
-  /** Generate, hash, store and email a new OTP, invalidating older unused ones. */
   async issue(userId: string, email: string, purpose: OtpPurpose): Promise<void> {
     const otp = randomInt(100000, 1000000).toString();
     const otpHash = await bcrypt.hash(otp, 12);
